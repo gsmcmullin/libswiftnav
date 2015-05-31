@@ -110,6 +110,35 @@ void calc_loop_gains(float bw, float zeta, float k, float loop_freq,
   *b1 = (T - 2*tau_2) / (2*tau_1);
 }
 
+void calc_loop_gains_2nd(float bw, float loop_freq, float b[3], float a[3])
+{
+  float T = 1/loop_freq;
+  float omega_n = bw/0.7845;
+  float b3w0 = 2.4*omega_n;
+  float a3w0w0 = 1.1*omega_n*omega_n;
+
+  a[0] = a[2] = 1;
+  a[1] = -2;
+
+  b[0] = T*T*omega_n*omega_n*omega_n/4 + a3w0w0*T/2 + b3w0;
+  b[1] = T*T*omega_n*omega_n*omega_n/2 - 2*b3w0;
+  b[2] = T*T*omega_n*omega_n*omega_n/4 - a3w0w0*T/2 + b3w0;
+}
+
+void calc_loop_gains_fll(float bw, float loop_freq, float b[3], float a[3])
+{
+  float T = 1/loop_freq;
+  float omega_n = bw/0.53;
+  float a2w0 = 1.414*omega_n;
+
+  a[0] = a[2] = 1;
+  a[1] = -2;
+
+  b[0] = T*omega_n*omega_n/4 + a2w0/2;
+  b[1] = -T*omega_n*omega_n/2;
+  b[2] = T*omega_n*omega_n/4 - a2w0/2;
+}
+
 /** Phase discriminator for a Costas loop.
  *
  * \image html costas_loop.png Costas loop block diagram.
@@ -260,6 +289,26 @@ void simple_lf_init(simple_lf_state_t *s, float y0,
   s->b1 = b1;
 }
 
+/** Initialise a simple biquad section filter.
+ * The gains can be calculated using calc_loop_gains().
+ *
+ * \param s The loop filter state struct to initialise.
+ * \param b Filter numerator coefficients \f$b_n\f$.
+ * \param a Filter denominator coefficients \f$a_n\f$.
+ */
+void biquad_lf_init(biquad_lf_state_t *s, float y0, float b[3], float a[3])
+{
+  /* Normalise coefficients */
+  for (int i = 0; i < 3; i++) {
+    s->b[i] = b[i] / a[0];
+    s->a[i] = a[i] / a[0];
+  }
+  if (b[0] + b[1] + b[2] != 0)
+    s->w[0] = s->w[1] = y0 / (s->b[0] + s->b[1] + s->b[2]);
+  else
+    s->w[0] = s->w[1] = 0;
+}
+
 /** Update step for the simple first-order loop filter.
  *
  * Implements the first-order loop filter as shown below:
@@ -284,6 +333,19 @@ float simple_lf_update(simple_lf_state_t *s, float error)
   return s->y;
 }
 
+float biquad_lf_update(biquad_lf_state_t *s, float error)
+{
+  /* a[0] is always 1 */
+  float w = error - s->a[1]*s->w[0] - s->a[2]*s->w[1];
+  float y = s->b[0]*w + s->b[1]*s->w[0] + s->b[2]*s->w[1];
+
+  /* Update internal state */
+  s->w[1] = s->w[0];
+  s->w[0] = w;
+
+  return y;
+}
+
 /** Initialise an aided tracking loop.
  *
  * For a full description of the loop filter parameters, see calc_loop_gains().
@@ -302,20 +364,21 @@ float simple_lf_update(simple_lf_state_t *s, float error)
  */
 void aided_tl_init(aided_tl_state_t *s, float loop_freq,
                    float code_freq, float code_bw,
-                   float code_zeta, float code_k,
                    float carr_freq, float carr_bw,
-                   float carr_zeta, float carr_k,
-                   float carr_freq_b1)
+                   float carr_fll_bw)
 {
-  float b0, b1;
-
+  float b[3], a[3];
   s->carr_freq = carr_freq;
-  s->prev_I = 1.0f; // This works, but is it a really good way to do it?
-  s->prev_Q = 0.0f;
-  calc_loop_gains(carr_bw, carr_zeta, carr_k, loop_freq, &b0, &b1);
-  aided_lf_init(&(s->carr_filt), carr_freq, b0, b1, carr_freq_b1);
+  calc_loop_gains_2nd(carr_bw, loop_freq, b, a);
+  biquad_lf_init(&s->carr_filt, carr_freq, b, a);
+  calc_loop_gains_fll(carr_fll_bw, loop_freq, b, a);
+  biquad_lf_init(&s->carr_fll_filt, carr_freq, b, a);
 
-  calc_loop_gains(code_bw, code_zeta, code_k, loop_freq, &b0, &b1);
+  s->prev_I = 1;
+  s->prev_Q = 0;
+
+  float b0, b1;
+  calc_loop_gains(code_bw, 0.7, 1, loop_freq, &b0, &b1);
   s->code_freq = code_freq;
   simple_lf_init(&(s->code_filt), code_freq, b0, b1);
 }
@@ -343,7 +406,8 @@ void aided_tl_update(aided_tl_state_t *s, correlation_t cs[3])
   float freq_error = frequency_discriminator(cs[1].I, cs[1].Q, s->prev_I, s->prev_Q);
   s->prev_I = cs[1].I;
   s->prev_Q = cs[1].Q;
-  s->carr_freq = aided_lf_update(&(s->carr_filt), carr_error, freq_error);
+  s->carr_freq = biquad_lf_update(&s->carr_filt, carr_error) +
+                 biquad_lf_update(&s->carr_fll_filt, freq_error);
 
   float code_error = dll_discriminator(cs);
   s->code_freq = simple_lf_update(&(s->code_filt), -code_error); // + s->carr_freq * SCALING_FACTOR
@@ -369,15 +433,18 @@ void simple_tl_init(simple_tl_state_t *s, float loop_freq,
                     float carr_freq, float carr_bw,
                     float carr_zeta, float carr_k)
 {
+  (void)carr_zeta; (void)carr_k;
+
   float b0, b1;
 
   calc_loop_gains(code_bw, code_zeta, code_k, loop_freq, &b0, &b1);
   s->code_freq = code_freq;
   simple_lf_init(&(s->code_filt), code_freq, b0, b1);
 
-  calc_loop_gains(carr_bw, carr_zeta, carr_k, loop_freq, &b0, &b1);
+  float b[3], a[3];
+  calc_loop_gains_2nd(carr_bw, loop_freq, b, a);
   s->carr_freq = carr_freq;
-  simple_lf_init(&(s->carr_filt), carr_freq, b0, b1);
+  biquad_lf_init(&(s->carr_filt), carr_freq, b, a);
 }
 
 /** Update step for the simple tracking loop.
@@ -399,7 +466,7 @@ void simple_tl_update(simple_tl_state_t *s, correlation_t cs[3])
   float code_error = dll_discriminator(cs);
   s->code_freq = simple_lf_update(&(s->code_filt), -code_error);
   float carr_error = costas_discriminator(cs[1].I, cs[1].Q);
-  s->carr_freq = simple_lf_update(&(s->carr_filt), carr_error);
+  s->carr_freq = biquad_lf_update(&(s->carr_filt), carr_error);
 }
 
 /** Initialise a code/carrier phase complimentary filter tracking loop.

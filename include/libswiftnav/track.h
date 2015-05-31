@@ -43,13 +43,23 @@ typedef struct {
   float y;          /**< Output variable. */
 } simple_lf_state_t;
 
+/** State structure for the simple 2nd order loop filter.
+ * Should be initialised with simple_2nd_lf_init().
+ */
+typedef struct {
+  float a[3];       /**< Filter denominator coefficient. */
+  float b[3];       /**< Filter numerator coefficient. */
+  float w[2];       /**< Intermediate state variable. */
+} biquad_lf_state_t;
+
 typedef struct { //TODO, add carrier aiding to the code loop.
   float carr_freq;             /**< Code frequency. */
-  aided_lf_state_t carr_filt ; /**< Carrier loop filter state. */
   float code_freq;             /**< Carrier frequenct. */
   simple_lf_state_t code_filt; /**< Code loop filter state. */
-  float prev_I;                /**< Previous timestep's in-phase integration. */
-  float prev_Q;                /**< Previous timestep's quadrature-phase integration. */
+  biquad_lf_state_t carr_filt; /**< Carrier loop filter state. */
+  biquad_lf_state_t carr_fll_filt; /**< Carrier loop filter state. */
+  float prev_I;
+  float prev_Q;
 } aided_tl_state_t;
 
 /** State structure for a simple tracking loop.
@@ -59,7 +69,7 @@ typedef struct {
   float code_freq;             /**< Code phase rate (i.e. frequency). */
   float carr_freq;             /**< Carrier frequency. */
   simple_lf_state_t code_filt; /**< Code loop filter state. */
-  simple_lf_state_t carr_filt; /**< Carrier loop filter state. */
+  biquad_lf_state_t carr_filt; /**< Carrier loop filter state. */
 } simple_tl_state_t;
 
 /** State structure for a code/carrier phase complimentary filter tracking
@@ -153,6 +163,8 @@ typedef struct {
 
 void calc_loop_gains(float bw, float zeta, float k, float loop_freq,
                      float *b0, float *b1);
+void calc_loop_gains_2nd(float bw, float loop_freq, float b[3], float a[3]);
+void calc_loop_gains_fll(float bw, float loop_freq, float b[3], float a[3]);
 float costas_discriminator(float I, float Q);
 float frequency_discriminator(float I, float Q, float prev_I, float prev_Q);
 float dll_discriminator(correlation_t cs[3]);
@@ -166,6 +178,11 @@ void simple_lf_init(simple_lf_state_t *s, float y0,
                     float pgain, float igain);
 float simple_lf_update(simple_lf_state_t *s, float error);
 
+void biquad_lf_init(biquad_lf_state_t *s, float y0, float b[3], float a[3]);
+float biquad_lf_update(biquad_lf_state_t *s, float error);
+
+void simple_2nd_lf_init(simple_lf_state_t *s, float b[3], float a[3]);
+float simple_2nd_lf_update(simple_lf_state_t *s, float error);
 
 void simple_tl_init(simple_tl_state_t *s, float loop_freq,
                     float code_freq, float code_bw,
@@ -176,10 +193,8 @@ void simple_tl_update(simple_tl_state_t *s, correlation_t cs[3]);
 
 void aided_tl_init(aided_tl_state_t *s, float loop_freq,
                    float code_freq, float code_bw,
-                   float code_zeta, float code_k,
                    float carr_freq, float carr_bw,
-                   float carr_zeta, float carr_k,
-                   float carr_freq_igain);
+                   float carr_fll_bw);
 void aided_tl_update(aided_tl_state_t *s, correlation_t cs[3]);
 
 void comp_tl_init(comp_tl_state_t *s, float loop_freq,
